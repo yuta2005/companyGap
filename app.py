@@ -1,5 +1,5 @@
 """
-app.py  ─  インターン体験記と会社ページとの乖離度測定 UI
+app.py  ─  IR資料とプレスリリースの表現ギャップ測定 UI
 
 起動:
   python -m streamlit run app.py
@@ -12,7 +12,7 @@ from engine import analyze_all, analyze_company
 
 # ─── ページ設定 ───────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="インターン体験記 × 会社ページ 乖離度測定",
+    page_title="IR資料 × プレスリリース 表現ギャップ測定",
     page_icon="🔍",
     layout="wide",
 )
@@ -73,8 +73,8 @@ html, body, [class*="css"] {
 # ─── ヘッダー ─────────────────────────────────────────────────────────────────
 st.markdown("""
 <div class="hero">
-  <h1>🔍 インターン体験記 × 会社ページ 乖離度測定</h1>
-  <p>会社が謳う「社風・文化」と、インターン生が実際に体験したことのギャップを可視化します</p>
+  <h1>🔍 IR資料 × プレスリリース 表現ギャップ測定</h1>
+  <p>決算短信・有価証券報告書の事実ベース記述と、プレスリリースのアピール表現のギャップを可視化します</p>
 </div>
 """, unsafe_allow_html=True)
 
@@ -100,8 +100,8 @@ with st.sidebar:
     st.markdown("""
 | スコア | 意味 |
 |--------|------|
-| **乖離度** | 会社ページと体験記のズレ（高=要注意） |
-| **感情** | 体験記のポジネガ度（正=ポジティブ） |
+| **表現ギャップ** | IR資料とプレスリリースのズレ（高=要注意） |
+| **感情** | プレスリリースのポジネガ度（正=ポジティブ） |
 | **KW一致率** | 共通キーワードの割合 |
 | **リアル度** | 総合信頼スコア（高=一致している） |
 """)
@@ -113,7 +113,7 @@ with st.sidebar:
 # モード 1: 全社ランキング
 # ══════════════════════════════════════════════════════════════════════════════
 if view_mode == "全社ランキング":
-    st.subheader("🏢 社風リアル度 ランキング（低い順 = 要注意）")
+    st.subheader("🏢 IR誠実度 ランキング（低い順 = 要注意）")
 
     # サマリメトリクス
     c1, c2, c3, c4 = st.columns(4)
@@ -125,7 +125,7 @@ if view_mode == "全社ランキング":
     with c2:
         worst = df.iloc[0]
         st.markdown(f"""<div class="metric-card">
-            <div class="metric-label">最大乖離度</div>
+            <div class="metric-label">最大表現ギャップ</div>
             <div class="metric-value" style="color:#f87171">{df['gap_score'].max():.1f}%</div></div>""",
             unsafe_allow_html=True)
     with c3:
@@ -180,42 +180,42 @@ if view_mode == "全社ランキング":
                 <div style="background:#1e293b; border-radius:6px; height:12px; margin:.4rem 0;">
                   <div style="background:{bar_color}; width:{bar_w}%; height:12px; border-radius:6px;"></div>
                 </div>
-                <div style="color:{label_color}; font-size:.85rem;">社風リアル度 {real:.1f} / 100</div>
+                <div style="color:{label_color}; font-size:.85rem;">IR誠実度 {real:.1f} / 100</div>
                 """, unsafe_allow_html=True)
 
                 # キーワードピル
                 kw_html = ""
-                for kw in row["kw_company"][:4]:
+                for kw in row["kw_ir"][:4]:
                     kw_html += f'<span class="kw-pill kw-company">{kw}</span>'
-                for kw in row["kw_intern"][:4]:
+                for kw in row["kw_press"][:4]:
                     kw_html += f'<span class="kw-pill kw-intern">{kw}</span>'
                 if kw_html:
                     st.markdown(kw_html, unsafe_allow_html=True)
 
             with col_scores:
                 m1, m2, m3 = st.columns(3)
-                m1.metric("乖離度", f"{row['gap_score']:.1f}%")
+                m1.metric("表現ギャップ", f"{row['gap_score']:.1f}%")
                 m2.metric("感情", f"{row['sentiment']:+.2f}")
                 m3.metric("KW一致", f"{row['kw_match']:.0f}%")
 
             with st.expander("代表文・キーワード詳細を見る"):
                 left, right = st.columns(2)
                 with left:
-                    st.markdown("🏢 **会社ページ代表文**")
-                    st.markdown(f'<div class="rep-box">{row["rep_company"]}</div>',
+                    st.markdown("🏢 **IR資料代表文**")
+                    st.markdown(f'<div class="rep-box">{row["rep_ir"]}</div>',
                                 unsafe_allow_html=True)
-                    st.markdown("**会社ページ固有KW** （体験記に出てこない語）")
+                    st.markdown("**IR資料固有KW** （プレスリリースに出てこない語）")
                     pills = "".join([f'<span class="kw-pill kw-company">{k}</span>'
-                                     for k in row["kw_company"]])
+                                     for k in row["kw_ir"]])
                     st.markdown(pills or "（なし）", unsafe_allow_html=True)
 
                 with right:
-                    st.markdown("💬 **インターン体験記代表文**")
-                    st.markdown(f'<div class="rep-box">{row["rep_intern"]}</div>',
+                    st.markdown("💬 **プレスリリース代表文**")
+                    st.markdown(f'<div class="rep-box">{row["rep_press"]}</div>',
                                 unsafe_allow_html=True)
-                    st.markdown("**体験記固有KW** （会社ページに出てこない語）")
+                    st.markdown("**プレスリリース固有KW** （IR資料に出てこない語）")
                     pills = "".join([f'<span class="kw-pill kw-intern">{k}</span>'
-                                     for k in row["kw_intern"]])
+                                     for k in row["kw_press"]])
                     st.markdown(pills or "（なし）", unsafe_allow_html=True)
 
                 common_pills = "".join([f'<span class="kw-pill kw-common">{k}</span>'
@@ -240,8 +240,8 @@ elif view_mode == "企業詳細分析":
     real = row["realness"]
     real_color = "#ef4444" if real < 40 else "#f59e0b" if real < 65 else "#10b981"
 
-    c1.metric("🎯 社風リアル度", f"{real:.1f} / 100")
-    c2.metric("📏 乖離度スコア", f"{row['gap_score']:.1f}%",
+    c1.metric("🎯 IR誠実度", f"{real:.1f} / 100")
+    c2.metric("📏 表現ギャップスコア", f"{row['gap_score']:.1f}%",
               delta=f"{50 - row['gap_score']:.1f}% vs 平均",
               delta_color="inverse")
     c3.metric("💭 感情スコア", f"{row['sentiment']:+.3f}")
@@ -257,7 +257,7 @@ elif view_mode == "企業詳細分析":
            transition: width 0.8s ease;"></div>
     </div>
     <div style="text-align:center; color:{real_color}; margin-top:.4rem; font-weight:600;">
-      社風リアル度 {real:.1f} / 100
+      IR誠実度 {real:.1f} / 100
     </div>
     """, unsafe_allow_html=True)
 
@@ -265,19 +265,19 @@ elif view_mode == "企業詳細分析":
 
     left, right = st.columns(2)
     with left:
-        st.markdown("#### 🏢 会社ページ")
-        st.markdown(f'<div class="rep-box">{row["rep_company"]}</div>', unsafe_allow_html=True)
-        st.markdown("**会社ページ固有キーワード**（建前ワード）")
+        st.markdown("#### 🏢 IR資料")
+        st.markdown(f'<div class="rep-box">{row["rep_ir"]}</div>', unsafe_allow_html=True)
+        st.markdown("**IR資料固有キーワード**（建前ワード）")
         pills = "".join([f'<span class="kw-pill kw-company">{k}</span>'
-                         for k in row["kw_company"]])
+                         for k in row["kw_ir"]])
         st.markdown(pills or "（抽出できませんでした）", unsafe_allow_html=True)
 
     with right:
-        st.markdown("#### 💬 インターン体験記")
-        st.markdown(f'<div class="rep-box">{row["rep_intern"]}</div>', unsafe_allow_html=True)
-        st.markdown("**体験記固有キーワード**（本音ワード）")
+        st.markdown("#### 💬 プレスリリース")
+        st.markdown(f'<div class="rep-box">{row["rep_press"]}</div>', unsafe_allow_html=True)
+        st.markdown("**プレスリリース固有キーワード**（本音ワード）")
         pills = "".join([f'<span class="kw-pill kw-intern">{k}</span>'
-                         for k in row["kw_intern"]])
+                         for k in row["kw_press"]])
         st.markdown(pills or "（抽出できませんでした）", unsafe_allow_html=True)
 
     if row["kw_common"]:
@@ -292,67 +292,67 @@ elif view_mode == "企業詳細分析":
 # ══════════════════════════════════════════════════════════════════════════════
 elif view_mode == "手動入力で分析":
     st.subheader("✍️ テキストを直接入力して分析")
-    st.caption("会社採用ページのコピーと、インターン体験記のコピーを貼り付けてください")
+    st.caption("IR資料(決算短信・有価証券報告書)のコピーと、プレスリリースのコピーを貼り付けてください")
 
     col1, col2 = st.columns(2)
     with col1:
         company_name = st.text_input("企業名", placeholder="例: 株式会社〇〇")
-        company_text = st.text_area(
-            "会社採用ページのテキスト",
+        ir_text = st.text_area(
+            "IR資料のテキスト",
             height=220,
-            placeholder="会社採用ページから文章をコピー＆ペーストしてください...",
+            placeholder="決算短信・有価証券報告書から文章をコピー＆ペーストしてください...",
         )
     with col2:
         st.markdown("")  # spacing
-        intern_text = st.text_area(
-            "インターン体験記のテキスト",
+        press_text = st.text_area(
+            "プレスリリースのテキスト",
             height=220,
-            placeholder="就活会議・ワンキャリア等から体験記をコピー＆ペーストしてください...",
+            placeholder="企業公式IRページのプレスリリースをコピー＆ペーストしてください...",
         )
 
-    if st.button("🔍 乖離度を測定する", type="primary", use_container_width=True):
-        if not company_text.strip() or not intern_text.strip():
+    if st.button("🔍 表現ギャップを測定する", type="primary", use_container_width=True):
+        if not ir_text.strip() or not press_text.strip():
             st.warning("両方のテキストを入力してください。")
         else:
             with st.spinner("分析中..."):
                 result = analyze_company(
                     company_name or "入力企業",
-                    company_text,
-                    intern_text,
+                    ir_text,
+                    press_text,
                 )
 
             real = result["realness"]
             real_color = "#ef4444" if real < 40 else "#f59e0b" if real < 65 else "#10b981"
             verdict = "⚠️ 要注意（大きな乖離あり）" if real < 40 else "🔶 やや乖離あり" if real < 65 else "✅ 概ね一致しています"
 
-            st.success(f"{verdict} — 社風リアル度: **{real:.1f} / 100**")
+            st.success(f"{verdict} — IR誠実度: **{real:.1f} / 100**")
 
             c1, c2, c3 = st.columns(3)
-            c1.metric("乖離度スコア", f"{result['gap_score']:.1f}%")
-            c2.metric("体験記の感情", f"{result['sentiment']:+.3f}")
+            c1.metric("表現ギャップスコア", f"{result['gap_score']:.1f}%")
+            c2.metric("プレスリリースの感情", f"{result['sentiment']:+.3f}")
             c3.metric("KW一致率", f"{result['kw_match']:.1f}%")
 
             st.divider()
             left, right = st.columns(2)
             with left:
-                st.markdown("🏢 **会社ページ代表文**")
-                st.markdown(f'<div class="rep-box">{result["rep_company"]}</div>', unsafe_allow_html=True)
-                st.markdown("**会社ページ固有KW**")
+                st.markdown("🏢 **IR資料代表文**")
+                st.markdown(f'<div class="rep-box">{result["rep_ir"]}</div>', unsafe_allow_html=True)
+                st.markdown("**IR資料固有KW**")
                 pills = "".join([f'<span class="kw-pill kw-company">{k}</span>'
-                                 for k in result["kw_company"]])
+                                 for k in result["kw_ir"]])
                 st.markdown(pills or "（なし）", unsafe_allow_html=True)
 
             with right:
-                st.markdown("💬 **体験記代表文**")
-                st.markdown(f'<div class="rep-box">{result["rep_intern"]}</div>', unsafe_allow_html=True)
-                st.markdown("**体験記固有KW**")
+                st.markdown("💬 **プレスリリース代表文**")
+                st.markdown(f'<div class="rep-box">{result["rep_press"]}</div>', unsafe_allow_html=True)
+                st.markdown("**プレスリリース固有KW**")
                 pills = "".join([f'<span class="kw-pill kw-intern">{k}</span>'
-                                 for k in result["kw_intern"]])
+                                 for k in result["kw_press"]])
                 st.markdown(pills or "（なし）", unsafe_allow_html=True)
 
 # ─── フッター ─────────────────────────────────────────────────────────────────
 st.divider()
 st.caption(
-    "TF-IDF + コサイン類似度 / 感情極性辞書 / キーワード差分 による乖離度測定 | "
+    "TF-IDF + コサイン類似度 / 感情極性辞書 / キーワード差分 による表現ギャップ測定 | "
     "起動: `python -m streamlit run app.py`"
 )

@@ -1,33 +1,149 @@
 """
-collect.py  ─  企業採用ページ & インターン体験記を収集して jobs.csv に保存
+collect.py  ─  IR資料(有価証券報告書) と プレスリリースの乖離度測定用データ収集
+著作権上の安全性を重視し、体験記サイトのスクレイピングは廃止。
+代わりに以下の二種類を比較する:
+  - ir_summary      : EDINET(金融庁)から取得した有価証券報告書の
+                       「経営方針、経営環境及び対処すべき課題等」等の事実ベース記述
+  - press_release   : 企業公式IRページのプレスリリース／決算サマリー(見出し・アピール文)
+
+EDINET は著作権法30条の4(情報解析目的の利用)の趣旨に合致し、
+かつ金融庁が公的に開示している一次情報のため、体験記サイトよりも
+著作権・利用規約上のリスクが低い。
 
 使い方:
-  python collect.py                    # サンプルデータ（20社）を保存
-  python collect.py --scrape トヨタ    # 実際にスクレイピングを試みる（失敗時はサンプル）
+  1. EDINET利用者登録 → APIキー発行
+     https://disclosure2.edinet-fsa.go.jp/  (マイページ > API利用者登録)
+  2. 環境変数にキーを設定
+     export EDINET_API_KEY="発行されたキー"
+  3. python collect.py                       # サンプルデータ(20社)を保存
+     python collect.py --edinet E02144 2024-06-25   # 実データ取得(トヨタの例)
 """
 
-import csv
+import os
+import re
 import sys
+import csv
 import time
 import json
-import re
-from urllib.parse import urlparse
-from urllib.robotparser import RobotFileParser
+import io
+import zipfile
+import requests
 
 OUTPUT = "jobs.csv"
-FIELDS = ["company", "company_page", "intern_report"]
+FIELDS = ["company", "ir_summary", "press_release"]
 
-UA = "Mozilla/5.0 (research-bot; mailto:your@email.com)"
+EDINET_BASE = "https://api.edinet-fsa.go.jp/api/v2"
+API_KEY = os.environ.get("EDINET_API_KEY", "")
 
-# ─── robots.txt チェック ───────────────────────────────────────────────────────
-def can_fetch(url: str) -> bool:
-    """robots.txt を確認して取得可否を返す"""
+UA = "Mozilla/5.0 (research-bot; university-assignment; mailto:your@email.com)"
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 1. EDINET: 書類一覧の取得
+# ══════════════════════════════════════════════════════════════════════
+
+
+def fetch_document_list(date: str) -> list[dict]:
+    """指定日に提出された書類一覧を取得(メタデータのみ)"""
+    if not API_KEY:
+        print("[ERROR] 環境変数 EDINET_API_KEY が設定されていません")
+        return []
+    url = f"{EDINET_BASE}/documents.json"
+    params = {"date": date, "type": 2, "Subscription-Key": API_KEY}
     try:
-        import requests
+        res = requests.get(url, params=params, timeout=15)
+        res.raise_for_status()
+        data = res.json()
+        return data.get("results", [])
+    except Exception as e:
+        print(f"  [ERROR] 書類一覧取得失敗 ({date}): {e}")
+        return []
+
+
+def find_yuho(edinet_code: str, date: str) -> dict | None:
+    """指定日の書類一覧から、指定企業(edinetCode)の有価証券報告書(docTypeCode=120)を探す"""
+    docs = fetch_document_list(date)
+    for d in docs:
+        if d.get("edinetCode") == edinet_code and d.get("docTypeCode") == "120":
+            return d
+    return None
+
+
+def search_yuho_recent(edinet_code: str, days_back: int = 400) -> dict | None:
+    """過去 days_back 日をさかのぼって有価証券報告書を探す(年1回提出のため広めに探索)"""
+    from datetime import date as _date, timedelta
+
+    today = _date.today()
+    for i in range(days_back):
+        d = (today - timedelta(days=i)).strftime("%Y-%m-%d")
+        doc = find_yuho(edinet_code, d)
+        if doc:
+            return doc
+        time.sleep(0.3)  # API負荷軽減
+    return None
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 2. EDINET: 書類本文(CSV形式)のダウンロードとテキスト抽出
+# ══════════════════════════════════════════════════════════════════════
+
+# 抽出したい非財務テキスト項目(XBRL要素名の一部)
+TARGET_ELEMENTS = [
+    "jpcrp_cor:BusinessPolicyBusinessEnvironmentIssuesToAddressEtcTextBlock",  # 経営方針・経営環境・対処すべき課題
+    "jpcrp_cor:DescriptionOfBusinessTextBlock",  # 事業の内容
+]
+
+
+def download_yuho_text(doc_id: str) -> str:
+    """
+    有価証券報告書をCSV形式(type=5)で取得し、
+    「経営方針、経営環境及び対処すべき課題等」等のテキストを抽出する。
+    """
+    if not API_KEY:
+        return ""
+    url = f"{EDINET_BASE}/documents/{doc_id}"
+    params = {"type": 5, "Subscription-Key": API_KEY}
+    try:
+        res = requests.get(url, params=params, timeout=30)
+        res.raise_for_status()
+        texts = []
+        with zipfile.ZipFile(io.BytesIO(res.content)) as z:
+            for name in z.namelist():
+                if not (name.startswith("XBRL_TO_CSV/jpcrp") and name.endswith(".csv")):
+                    continue
+                with z.open(name) as f:
+                    # EDINETのCSVはUTF-16タブ区切り
+                    content = f.read().decode("utf-16")
+                    reader = csv.DictReader(io.StringIO(content), delimiter="\t")
+                    for row in reader:
+                        elem = row.get("要素ID", "")
+                        if any(t in elem for t in TARGET_ELEMENTS):
+                            val = row.get("値", "")
+                            if val:
+                                texts.append(val)
+        raw = " ".join(texts)
+        # HTMLタグ除去(XBRLテキストブロックにHTMLが含まれることがある)
+        clean = re.sub(r"<[^>]+>", " ", raw)
+        clean = re.sub(r"\s+", " ", clean).strip()
+        return clean[:2000]
+    except Exception as e:
+        print(f"  [ERROR] 書類本文取得失敗 ({doc_id}): {e}")
+        return ""
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 3. プレスリリース取得(企業公式IRページ, robots.txt確認付き)
+# ══════════════════════════════════════════════════════════════════════
+
+
+def can_fetch(url: str) -> bool:
+    from urllib.parse import urlparse
+    from urllib.robotparser import RobotFileParser
+
+    try:
         parsed = urlparse(url)
         robots_url = f"{parsed.scheme}://{parsed.netloc}/robots.txt"
         rp = RobotFileParser()
-        rp.set_url(robots_url)
         res = requests.get(robots_url, headers={"User-Agent": UA}, timeout=5)
         rp.parse(res.text.splitlines())
         allowed = rp.can_fetch(UA, url)
@@ -39,344 +155,161 @@ def can_fetch(url: str) -> bool:
         return False
 
 
-# ─── スクレイピング関数 ────────────────────────────────────────────────────────
-def scrape_one_career(company: str) -> list[str]:
-    """ワンキャリアのインターン体験記を取得（robots.txt 確認済み）"""
+def fetch_press_release(url: str) -> str:
+    """企業公式IRページ／プレスリリースページのテキストを取得(robots.txt確認済み)。
+    決算説明資料等はPDF公開が主流のため、PDF・HTMLの両方に対応する。"""
     try:
-        import requests
-        from bs4 import BeautifulSoup
-        base = "https://one-career.jp"
-        url  = f"{base}/search?q={company}&type=intern_experience"
-        if not can_fetch(url):
-            return []
-        res  = requests.get(url, headers={"User-Agent": UA}, timeout=10)
-        soup = BeautifulSoup(res.text, "html.parser")
-        reviews = [el.text.strip() for el in soup.select(".review-body, .experience-text, article p")]
-        time.sleep(1.5)
-        return [r for r in reviews if len(r) > 30][:5]
-    except Exception as e:
-        print(f"  [ERROR] ワンキャリア取得失敗: {e}")
-        return []
-
-
-def scrape_shukatsu_kaigi(company: str) -> list[str]:
-    """就活会議のインターン体験記を取得（robots.txt 確認済み）"""
-    try:
-        import requests
-        from bs4 import BeautifulSoup
-        base = "https://syukatsu-kaigi.jp"
-        url  = f"{base}/companies/search?q={company}"
-        if not can_fetch(url):
-            return []
-        res  = requests.get(url, headers={"User-Agent": UA}, timeout=10)
-        soup = BeautifulSoup(res.text, "html.parser")
-        reviews = [el.text.strip() for el in soup.select(".review-content, .intern-review, .body-text")]
-        time.sleep(1.5)
-        return [r for r in reviews if len(r) > 30][:5]
-    except Exception as e:
-        print(f"  [ERROR] 就活会議取得失敗: {e}")
-        return []
-
-
-def scrape_company_page(url: str) -> str:
-    """企業採用ページのテキストを取得（robots.txt 確認済み）"""
-    try:
-        import requests
-        from bs4 import BeautifulSoup
         if not can_fetch(url):
             return ""
-        res  = requests.get(url, headers={"User-Agent": UA}, timeout=10)
-        soup = BeautifulSoup(res.text, "html.parser")
-        # <main> または <article> のテキストを優先
-        main = soup.find("main") or soup.find("article") or soup.body
-        text = main.get_text(separator=" ", strip=True) if main else ""
+        res = requests.get(url, headers={"User-Agent": UA}, timeout=10)
+        content_type = res.headers.get("Content-Type", "").lower()
         time.sleep(1.5)
+
+        if "pdf" in content_type or url.lower().endswith(".pdf"):
+            from pypdf import PdfReader
+
+            reader = PdfReader(io.BytesIO(res.content))
+            text = " ".join(page.extract_text() or "" for page in reader.pages)
+        elif "html" in content_type:
+            from bs4 import BeautifulSoup
+
+            soup = BeautifulSoup(res.content, "html.parser")
+            main = soup.find("main") or soup.find("article") or soup.body
+            text = main.get_text(separator=" ", strip=True) if main else ""
+        else:
+            print(f"  [WARN] 未対応の形式のためスキップ ({content_type or '不明'}): {url}")
+            return ""
+
         return re.sub(r"\s+", " ", text)[:1000]
     except Exception as e:
-        print(f"  [ERROR] 採用ページ取得失敗 ({url}): {e}")
+        print(f"  [ERROR] プレスリリース取得失敗 ({url}): {e}")
         return ""
 
 
-def scrape_company(company: str) -> dict | None:
-    """1社分のデータを収集して dict を返す"""
-    print(f"  [{company}] 収集中...")
-    reviews = scrape_one_career(company) or scrape_shukatsu_kaigi(company)
-    if not reviews:
-        print(f"  [{company}] 体験記が取得できませんでした")
+# ══════════════════════════════════════════════════════════════════════
+# 4. 実データ収集のメインフロー
+# ══════════════════════════════════════════════════════════════════════
+
+
+def collect_company(company: str, edinet_code: str, press_url: str = "") -> dict | None:
+    print(f"  [{company}] EDINETから有価証券報告書を検索中...")
+    doc = search_yuho_recent(edinet_code)
+    if not doc:
+        print(f"  [{company}] 有価証券報告書が見つかりませんでした")
         return None
+    ir_text = download_yuho_text(doc["docID"])
+    if not ir_text:
+        print(f"  [{company}] 本文抽出に失敗しました")
+        return None
+    press_text = fetch_press_release(press_url) if press_url else ""
     return {
-        "company":       company,
-        "company_page":  "",        # 採用ページURLが判明したら scrape_company_page() を使う
-        "intern_report": " ".join(reviews),
+        "company": company,
+        "ir_summary": ir_text,
+        "press_release": press_text,
     }
 
 
-# ─── サンプルデータ ────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════
+# 5. サンプルデータ(合成) ─ 20社分
+#    ※実データ取得(EDINET API登録)が未完了でも動作確認できるよう用意。
+#      内容は「決算の事実」と「プレスリリースの見出し表現」の
+#      典型的なズレパターンを想定して作成した合成データ(実在企業の
+#      引用ではない)。
+# ══════════════════════════════════════════════════════════════════════
+
 SAMPLE_DATA = [
     {
-        "company": "株式会社グロースビジョン",
-        "company_page": (
-            "風通しの良いフラットな組織で、若手でも裁量を持って挑戦できる環境です。"
-            "メンバー全員が意見を言い合えるオープンな文化を大切にしています。"
-            "インターンにもプロジェクトのオーナーシップを与え、成長を全力でサポートします。"
+        "company": "A社(小売)",
+        "ir_summary": (
+            "当期の売上高は前期比3.2%減少し、営業利益は前期比18.7%の減益となった。"
+            "主要因は既存店売上の低迷と、原材料価格上昇に伴う売上原価率の悪化である。"
+            "国内市場の縮小を受け、来期は店舗数の見直しを検討している。"
         ),
-        "intern_report": (
-            "実際には上司の指示を待つだけで、自分から提案しても却下されることがほとんどでした。"
-            "会議はほぼ報告の場で、若手が発言できる雰囲気ではありませんでした。"
-            "裁量はほとんどなく、毎日同じ作業の繰り返しでした。"
-        ),
-    },
-    {
-        "company": "テックイノベーション合同会社",
-        "company_page": (
-            "最新技術を積極的に導入し、エンジニアが技術的挑戦に集中できる環境を整備しています。"
-            "週1回の勉強会や技術共有の場を設け、チーム全体でスキルアップを目指しています。"
-            "コードレビューを丁寧に行い、成長をサポートします。"
-        ),
-        "intern_report": (
-            "使用している技術スタックは古く、レガシーコードの保守が中心でした。"
-            "勉強会は存在しましたが、参加は任意で実質業務後の残業扱いでした。"
-            "コードレビューは丁寧で、メンターの方も親切に教えてくれました。"
+        "press_release": (
+            "新たな成長ステージへ。当社は顧客体験の革新を通じて持続的な価値創造を実現します。"
+            "デジタル戦略の加速により、次年度は攻めの投資フェーズに入ります。"
         ),
     },
     {
-        "company": "フューチャーデザイン株式会社",
-        "company_page": (
-            "ワークライフバランスを重視し、残業ゼロを目指しています。"
-            "リモートワーク推進で、場所を選ばず柔軟に働けます。"
-            "社員の健康を第一に考えた働き方改革を積極的に推進中です。"
+        "company": "B社(製造)",
+        "ir_summary": (
+            "当期の売上高は前期比5.1%増加し、営業利益は前期比6.3%増加した。"
+            "海外向け販売が堅調に推移したことが主な要因である。"
+            "設備投資は計画通り進捗しており、生産能力の増強を継続する。"
         ),
-        "intern_report": (
-            "インターン期間中も残業は当たり前で、平均毎日2〜3時間は残っていました。"
-            "リモートは週1回のみで、実態はほぼフル出社でした。"
-            "ワークライフバランスという言葉がむしろ違和感でした。"
-        ),
-    },
-    {
-        "company": "サステナブルテック株式会社",
-        "company_page": (
-            "社会課題の解決に向けた事業を展開し、社員一人ひとりが社会貢献を実感できる環境です。"
-            "SDGsへの取り組みを全社で推進し、持続可能な未来の実現に貢献しています。"
-            "インターンも実際のプロジェクトに参加し、社会的インパクトを体験できます。"
-        ),
-        "intern_report": (
-            "実際にSDGsに関連するプロジェクトに参画でき、やりがいを感じました。"
-            "社会貢献への意識が高い社員が多く、日々の業務でその姿勢を学べました。"
-            "インターンでも実際の顧客とのミーティングに同席でき、貴重な体験ができました。"
+        "press_release": (
+            "グローバル展開が着実に進展。海外売上の伸長を背景に増収増益を達成しました。"
+            "今後も持続的な成長を目指します。"
         ),
     },
     {
-        "company": "クリエイティブラボ株式会社",
-        "company_page": (
-            "クリエイターが自由に発想を広げられる創造的な職場環境を提供しています。"
-            "デザインと技術の融合を追求し、革新的なプロダクトを生み出しています。"
-            "インターンにもオリジナルの制作物を発表する機会があります。"
+        "company": "C社(IT)",
+        "ir_summary": (
+            "当期の営業利益は前期比42%減少した。主力事業の受注減少および人件費増加が影響した。"
+            "一部子会社において減損損失を計上している。"
         ),
-        "intern_report": (
-            "デザインの裁量は上位メンバーに集中しており、インターンは素材作成が中心でした。"
-            "発表の機会はありましたが、発表後のフィードバックが薄く改善につながりにくかったです。"
-            "職場の雰囲気は自由ですが、アウトプットへの評価基準が不明確でした。"
+        "press_release": (
+            "新規事業領域への挑戦を加速。次世代プロダクトの開発に注力し、"
+            "中長期的な企業価値向上を目指すフェーズに入りました。"
         ),
     },
     {
-        "company": "グローバルコネクト株式会社",
-        "company_page": (
-            "グローバルに活躍するチームで、英語を使った業務が日常的です。"
-            "海外拠点とのコラボレーションが多く、国際的なキャリアを築けます。"
-            "多様なバックグラウンドを持つメンバーと共に働く、真のダイバーシティ環境です。"
+        "company": "D社(食品)",
+        "ir_summary": (
+            "当期の売上高、営業利益ともに前期を上回り、過去最高益を更新した。"
+            "主力ブランドの販売が国内外で好調に推移した。"
         ),
-        "intern_report": (
-            "英語を使う機会は週に1〜2回の国際ミーティングのみで、日常業務は日本語中心でした。"
-            "海外拠点との連携はありましたが、インターンが参加できる機会は限られていました。"
-            "チームの多様性は感じましたが、実際のグローバル業務への関与は少なかったです。"
+        "press_release": (
+            "過去最高益を達成。お客様への価値提供が着実に成果として実を結んでいます。"
         ),
     },
     {
-        "company": "アカデミックブリッジ株式会社",
-        "company_page": (
-            "研究と実務を結ぶブリッジとして、学術的知見を社会実装するミッションを持っています。"
-            "大学・研究機関との連携が強く、最先端の知識を実ビジネスに活かせます。"
-            "インターンも論文執筆や学会発表のサポートができる環境です。"
+        "company": "E社(不動産)",
+        "ir_summary": (
+            "当期は保有物件の含み損を一部実現し、特別損失を計上した。"
+            "営業利益は前期比横ばいで推移している。市況の先行き不透明感が続く。"
         ),
-        "intern_report": (
-            "実際に大学教授や研究者と連携するプロジェクトに参加でき、刺激的でした。"
-            "論文レビューや資料まとめなど、アカデミックな作業が多く学びが深かったです。"
-            "学会発表の準備を手伝えたことは、貴重な経験になりました。"
-        ),
-    },
-    {
-        "company": "ハイスピードベンチャー株式会社",
-        "company_page": (
-            "スタートアップのスピード感で意思決定し、挑戦を楽しめる人を歓迎します。"
-            "失敗を恐れずチャレンジできる文化があり、高速でのPDCAを回せます。"
-            "インターンでも重要な役割を担い、会社の成長に貢献できます。"
-        ),
-        "intern_report": (
-            "スピード感は本当に速く、毎日変化があり刺激的でした。"
-            "任された業務の責任範囲が広く、プレッシャーはありましたが成長できました。"
-            "失敗してもすぐ次に切り替える文化があり、前向きに取り組めました。"
-        ),
-    },
-    {
-        "company": "コンサルパートナーズ株式会社",
-        "company_page": (
-            "論理的思考力と実行力を兼ね備えたコンサルタントを育てる環境があります。"
-            "クライアントの経営課題に向き合い、ビジネスインパクトを創出できます。"
-            "インターンも実際のプロジェクトにアサインされ、本物の仕事を経験できます。"
-        ),
-        "intern_report": (
-            "実際のプロジェクトにアサインされましたが、主にデータ集計や資料作成が中心でした。"
-            "クライアントとの会議には同席しましたが、発言の機会はありませんでした。"
-            "論理的思考のトレーニングは充実しており、フレームワーク学習は役立ちました。"
-        ),
-    },
-    {
-        "company": "ウェルネステック株式会社",
-        "company_page": (
-            "社員の健康と幸福を最優先に、心理的安全性の高い職場環境を構築しています。"
-            "1on1ミーティングを毎週実施し、社員一人ひとりのメンタルケアを徹底します。"
-            "有給消化率100%を達成し、働きやすさNO.1を目指しています。"
-        ),
-        "intern_report": (
-            "1on1は確かに毎週ありましたが、形式的で相談しにくい雰囲気でした。"
-            "インターン期間中は有給がなく、体調不良時の対応が不明確でした。"
-            "社員の方々は忙しそうで、心理的安全性とは言いにくい空気を感じました。"
-        ),
-    },
-    {
-        "company": "エドテックジャパン株式会社",
-        "company_page": (
-            "教育×テクノロジーで日本の学習環境を変革する、情熱あるチームです。"
-            "全社員が教育への深い信念を持ち、ユーザーファーストを徹底しています。"
-            "インターンにも製品改善のアイデアを提案・実装できる機会があります。"
-        ),
-        "intern_report": (
-            "教育への熱量が高い社員が多く、ミッションへの共感が強い環境でした。"
-            "ユーザーの声を直接聞くインタビューに参加でき、製品理解が深まりました。"
-            "提案したアイデアが採用され、実際に機能として実装されたのは大きな達成感でした。"
-        ),
-    },
-    {
-        "company": "フィンテックアドバンス株式会社",
-        "company_page": (
-            "金融×テクノロジーで革新的なサービスを提供し、社会のインフラを支えています。"
-            "高度なセキュリティ基準のもと、最先端の開発に携われます。"
-            "インターンも本番環境に近い開発経験ができます。"
-        ),
-        "intern_report": (
-            "セキュリティ規定が厳しく、開発環境の制約が多くて作業効率が悪かったです。"
-            "本番に近い環境とは言え、インターンは検証環境のみのアクセスでした。"
-            "金融サービスならではの厳密さは学べましたが、自由度の低さにストレスを感じました。"
-        ),
-    },
-    {
-        "company": "ソーシャルインパクト株式会社",
-        "company_page": (
-            "社会課題をビジネスで解決する、熱量高い仲間たちと共に働けます。"
-            "NPOや行政との協働プロジェクトも多く、多様なステークホルダーと関われます。"
-            "インターンから正社員登用実績も多数あります。"
-        ),
-        "intern_report": (
-            "NPOや行政との連携は本当にあり、スケールの大きな仕事ができました。"
-            "社員の方の情熱が伝わってきて、自分も社会課題に向き合う意識が高まりました。"
-            "インターン後に内定を頂き、現在も選考が継続しています。"
-        ),
-    },
-    {
-        "company": "デジタルマーケティング株式会社",
-        "company_page": (
-            "データドリブンなマーケティングで、クライアントの成長を加速します。"
-            "Google・Meta等の最新広告技術を駆使し、ROIを最大化します。"
-            "インターンもリアルな広告運用データに触れ、実践的なスキルを習得できます。"
-        ),
-        "intern_report": (
-            "実際の広告アカウントを任せてもらえたのは良かったですが、予算規模が小さかったです。"
-            "データ分析は毎日行いましたが、施策提案の機会はあまりありませんでした。"
-            "実践的なスキルは確かに身につきましたが、業務範囲が狭く感じました。"
-        ),
-    },
-    {
-        "company": "AIリサーチラボ株式会社",
-        "company_page": (
-            "世界トップレベルの研究者と共に、AGIの実現に向けた最先端研究を行います。"
-            "論文の共著者になれるチャンスもあり、アカデミアとの強固なパイプを持ちます。"
-            "インターンでも研究の最前線に立てる、刺激的な環境です。"
-        ),
-        "intern_report": (
-            "研究者の方々は優秀でしたが、インターンに与えられたタスクはデータ整備が中心でした。"
-            "論文への関与は難しく、実質的にはサポート業務が多かったです。"
-            "研究の雰囲気に触れられたのは良かったですが、自分が貢献できた感覚は薄かったです。"
-        ),
-    },
-    {
-        "company": "コミュニティプラットフォーム株式会社",
-        "company_page": (
-            "人と人をつなぐプラットフォームで、温かいコミュニティを育てています。"
-            "社内の雰囲気も家族のように温かく、長期的に働きたいと思える職場です。"
-            "インターンも即戦力として扱い、チームの一員として迎えます。"
-        ),
-        "intern_report": (
-            "チームの雰囲気は本当に温かく、インターンでも居心地よく働けました。"
-            "即戦力とは言われましたが、最初の2週間はほぼ研修で実務は後半でした。"
-            "社員の方が親身に指導してくれたのは、非常にありがたかったです。"
-        ),
-    },
-    {
-        "company": "ロジスティクスDX株式会社",
-        "company_page": (
-            "物流業界をDXで変革し、社会インフラの効率化に貢献します。"
-            "現場と技術の両方を理解したエンジニアを育て、実務に直結したスキルを習得できます。"
-            "インターンも現場視察や倉庫見学など、リアルな業務体験が可能です。"
-        ),
-        "intern_report": (
-            "現場視察は1回のみで、主にオフィスでのデスクワークが中心でした。"
-            "物流システムの開発には関わりましたが、現場との距離を感じました。"
-            "DXというより既存システムの保守作業が多く、変革感は薄かったです。"
-        ),
-    },
-    {
-        "company": "ヘルスケアイノベーション株式会社",
-        "company_page": (
-            "医療×ITで人々の健康を守る、意義のある仕事ができます。"
-            "医師・看護師・エンジニアが協働し、現場のリアルな課題を解決します。"
-            "インターンも医療現場の声を直接聞く機会があります。"
-        ),
-        "intern_report": (
-            "医療従事者の方とのミーティングに参加でき、現場のニーズを深く理解できました。"
-            "社会的意義を感じながら働ける環境で、モチベーションが高まりました。"
-            "医師の方が丁寧に医療知識を教えてくれたのは、非常に貴重な体験でした。"
-        ),
-    },
-    {
-        "company": "スポーツアナリティクス株式会社",
-        "company_page": (
-            "スポーツ×データで選手のパフォーマンスを最大化する、新しい挑戦をしています。"
-            "プロスポーツチームとの契約実績があり、実際の試合データを扱えます。"
-            "インターンもプロの現場で使われる分析手法を学べます。"
-        ),
-        "intern_report": (
-            "実際のプロチームのデータを扱えたのは大きな魅力でした。"
-            "分析手法も実践的で、Pythonとスポーツ統計の両方が身につきました。"
-            "スポーツ好きな社員が多く、職場の雰囲気が良かったです。"
-        ),
-    },
-    {
-        "company": "シェアリングエコノミー株式会社",
-        "company_page": (
-            "所有から共有へのパラダイムシフトを牽引する、社会変革型スタートアップです。"
-            "ユーザーと運営者の双方にWin-Winの価値を提供するプラットフォームを運営しています。"
-            "インターンにもグロースハックの実務経験を積める環境があります。"
-        ),
-        "intern_report": (
-            "グロースに関する業務は確かにありましたが、A/Bテストの設計から実行まで時間がかかりました。"
-            "ユーザーインタビューには参加でき、プロダクト思考を鍛えられました。"
-            "社会変革というよりはビジネス的な施策が中心で、少しギャップを感じました。"
+        "press_release": (
+            "資産ポートフォリオの最適化を断行。将来の収益基盤強化に向けた"
+            "戦略的な一手として評価しています。"
         ),
     },
 ]
 
+# 残り15社分は上記5パターンをベースにした簡易バリエーション
+_EXTRA_NAMES = [
+    "F社(通信)",
+    "G社(化学)",
+    "H社(運輸)",
+    "I社(金融)",
+    "J社(医薬)",
+    "K社(電機)",
+    "L社(サービス)",
+    "M社(建設)",
+    "N社(エネルギー)",
+    "O社(商社)",
+    "P社(自動車)",
+    "Q社(繊維)",
+    "R社(鉄鋼)",
+    "S社(海運)",
+    "T社(教育)",
+]
+for i, name in enumerate(_EXTRA_NAMES):
+    base = SAMPLE_DATA[i % 5]
+    SAMPLE_DATA.append(
+        {
+            "company": name,
+            "ir_summary": base["ir_summary"],
+            "press_release": base["press_release"],
+        }
+    )
 
-# ─── CSV 保存 ─────────────────────────────────────────────────────────────────
+
+# ══════════════════════════════════════════════════════════════════════
+# 6. CSV保存 & メイン
+# ══════════════════════════════════════════════════════════════════════
+
+
 def save_csv(data: list, path: str = OUTPUT) -> None:
     with open(path, "w", newline="", encoding="utf-8-sig") as f:
         writer = csv.DictWriter(f, fieldnames=FIELDS)
@@ -385,27 +318,26 @@ def save_csv(data: list, path: str = OUTPUT) -> None:
     print(f"[OK] {len(data)} 件を {path} に保存しました")
 
 
-# ─── メイン ───────────────────────────────────────────────────────────────────
 def main():
-    if "--scrape" in sys.argv:
-        idx = sys.argv.index("--scrape")
-        companies = sys.argv[idx + 1:] if idx + 1 < len(sys.argv) else []
-        if not companies:
-            print("[ERROR] 企業名を指定してください: python collect.py --scrape トヨタ ソニー")
+    if "--edinet" in sys.argv:
+        idx = sys.argv.index("--edinet")
+        args = sys.argv[idx + 1 :]
+        if len(args) < 1:
+            print(
+                "[ERROR] 使い方: python collect.py --edinet <EDINETコード> [基準日 YYYY-MM-DD]"
+            )
             sys.exit(1)
-        results = []
-        for company in companies:
-            row = scrape_company(company)
-            if row:
-                results.append(row)
-        if results:
-            save_csv(results)
+        edinet_code = args[0]
+        row = collect_company(f"企業({edinet_code})", edinet_code)
+        if row:
+            save_csv([row])
         else:
             print("[WARN] 取得できませんでした。サンプルデータを保存します。")
             save_csv(SAMPLE_DATA)
     else:
-        print("[INFO] サンプルデータ（20社）を保存します")
-        print("       スクレイピングする場合: python collect.py --scrape 企業名1 企業名2")
+        print("[INFO] サンプルデータ(合成・20社分)を保存します")
+        print("       実データ取得: EDINET_API_KEY を設定の上")
+        print("       python collect.py --edinet <EDINETコード>")
         save_csv(SAMPLE_DATA)
 
 

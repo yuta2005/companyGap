@@ -1,18 +1,23 @@
 """
-engine.py  ─  乖離度測定の全ロジック
+engine.py  ─  IR資料 × プレスリリース 表現ギャップ測定の全ロジック
+
+会社の「決算実態(有価証券報告書等の事実ベース記述)」と
+「プレスリリースの見出し・アピール文」の乖離を測定する。
+プレスリリースデータではなく EDINET(金融庁)由来の公開データを用いるため、
+著作権法30条の4(情報解析目的の利用)の趣旨に沿った設計にしている。
 
 機能:
   - tokenize()          MeCab / fugashi → char n-gram フォールバック
-  - calc_gap_score()    TF-IDF + コサイン類似度 → ギャップスコア
+  - calc_gap_score()    TF-IDF + コサイン類似度 → 表現ギャップスコア
   - sentiment_score()   pn-ja.dic（あれば）+ 内蔵辞書で感情スコア
-  - keyword_diff()      会社ページ・体験記それぞれの特徴語を抽出
-  - realness_score()    3指標を重み付け合算
+  - keyword_diff()      IR資料・プレスリリースそれぞれの特徴語を抽出
+  - realness_score()    3指標を重み付け合算(IR誠実度)
   - analyze_company()   1社分の全指標を dict で返す
   - analyze_all()       CSV 全社を分析して DataFrame を返す
 
 使い方:
   python engine.py                  # CSV 全社をランキング表示
-  python engine.py グロースビジョン  # 特定企業を詳細表示
+  python engine.py A社               # 特定企業を詳細表示
 """
 
 import os
@@ -66,7 +71,7 @@ _STOPWORDS = {
     "て", "し", "た", "い", "な", "こと", "もの", "ため", "よう", "あり", "でき",
     "いる", "する", "ある", "なる", "れる", "られる", "ます", "です", "ない",
     "その", "この", "それ", "これ", "あの", "ご", "お", "さ", "ん", "か",
-    "インターン", "会社", "企業", "仕事", "業務", "社員",  # 全社共通で頻出 → 弁別力低
+    "当社", "会社", "企業", "当期", "前期", "事業",  # 全社共通で頻出 → 弁別力低
 }
 
 TARGET_POS = {"名詞", "動詞", "形容詞"}  # 抽出する品詞
@@ -112,18 +117,18 @@ def _join_tokens(text: str) -> str:
 # 2. ギャップスコア（TF-IDF + コサイン類似度）
 # ══════════════════════════════════════════════════════════════════════════════
 
-def calc_gap_score(company_page: str, intern_report: str) -> float:
+def calc_gap_score(ir_summary: str, press_release: str) -> float:
     """
-    会社ページと体験記のコサイン類似度から乖離度を算出。
+    IR資料とプレスリリースのコサイン類似度から表現ギャップを算出。
     返値: 0〜100（高いほど建前と本音がズレている）
     """
     if _TOKENIZE_MODE == "chargram":
         vec = TfidfVectorizer(analyzer="char_wb", ngram_range=(2, 3), min_df=1)
-        docs = [company_page, intern_report]
+        docs = [ir_summary, press_release]
     else:
         vec = TfidfVectorizer(analyzer="word", token_pattern=None,
                               tokenizer=tokenize, min_df=1)
-        docs = [company_page, intern_report]
+        docs = [ir_summary, press_release]
 
     try:
         tfidf = vec.fit_transform(docs)
@@ -139,18 +144,14 @@ def calc_gap_score(company_page: str, intern_report: str) -> float:
 
 # 内蔵の職場感情辞書（pn-ja.dic がなくても動作）
 _BUILTIN_PN: dict[str, float] = {
-    # ポジティブ
-    "充実": 0.8, "やりがい": 0.9, "成長": 0.7, "貴重": 0.7, "刺激": 0.6,
-    "達成": 0.8, "感謝": 0.7, "親切": 0.8, "丁寧": 0.7, "温かい": 0.8,
-    "楽しい": 0.9, "喜び": 0.8, "信頼": 0.7, "活躍": 0.7, "挑戦": 0.5,
-    "自由": 0.6, "柔軟": 0.6, "スキル": 0.5, "学び": 0.7, "熱量": 0.6,
-    "共感": 0.7, "明確": 0.6, "サポート": 0.6, "採用": 0.4,
-    # ネガティブ
-    "残業": -0.8, "辛い": -0.9, "困難": -0.6, "違和感": -0.7, "不満": -0.8,
-    "ストレス": -0.9, "不明確": -0.7, "狭い": -0.4, "限られた": -0.5,
-    "少ない": -0.5, "却下": -0.8, "形式的": -0.6, "制約": -0.6,
-    "古い": -0.5, "保守": -0.3, "繰り返し": -0.5, "プレッシャー": -0.5,
-    "難しい": -0.4, "薄い": -0.4, "弱い": -0.4, "乏しい": -0.6,
+    # IR/プレスリリース文脈で使われがちな「前向きアピール」語(実態を伴わない場合に乖離を生む)
+    "挑戦": 0.5, "加速": 0.5, "革新": 0.6, "最適化": 0.4, "価値創造": 0.6,
+    "成長ステージ": 0.6, "戦略的": 0.4, "着実": 0.5, "積極的": 0.4,
+    # 決算の事実として現れやすい「ネガティブ」語
+    "減益": -0.8, "減少": -0.5, "損失": -0.8, "減損": -0.8, "縮小": -0.6,
+    "低迷": -0.7, "悪化": -0.7, "先行き不透明": -0.6,
+    # 決算の事実として現れやすい「ポジティブ」語
+    "増益": 0.8, "増加": 0.5, "堅調": 0.6, "過去最高": 0.9, "上回った": 0.5,
 }
 
 def _load_pn_dic(path: str = PN_DIC_PATH) -> dict[str, float]:
@@ -221,15 +222,15 @@ def _top_keywords(text: str, n: int = 8) -> list[str]:
         return []
 
 
-def keyword_diff(company_page: str, intern_report: str, n: int = 6) -> dict:
+def keyword_diff(ir_summary: str, press_release: str, n: int = 6) -> dict:
     """
-    会社ページと体験記のキーワード差分を返す。
-    - company_only: 会社が強調しているがインターンが言及しない語
-    - intern_only : インターンが言及するが会社が触れない語
+    IR資料とプレスリリースのキーワード差分を返す。
+    - company_only: IR資料にのみ現れる語
+    - intern_only : プレスリリースにのみ現れる語
     - common      : 両方で使われている語
     """
-    cp_kws = set(_top_keywords(company_page, n=20))
-    ir_kws = set(_top_keywords(intern_report, n=20))
+    cp_kws = set(_top_keywords(ir_summary, n=20))
+    ir_kws = set(_top_keywords(press_release, n=20))
     company_only = list(cp_kws - ir_kws)[:n]
     intern_only  = list(ir_kws - cp_kws)[:n]
     common       = list(cp_kws & ir_kws)[:n]
@@ -240,10 +241,10 @@ def keyword_diff(company_page: str, intern_report: str, n: int = 6) -> dict:
     }
 
 
-def keyword_match_rate(company_page: str, intern_report: str) -> float:
+def keyword_match_rate(ir_summary: str, press_release: str) -> float:
     """キーワードの一致率（0〜1）"""
-    cp_kws = set(_top_keywords(company_page, n=20))
-    ir_kws = set(_top_keywords(intern_report, n=20))
+    cp_kws = set(_top_keywords(ir_summary, n=20))
+    ir_kws = set(_top_keywords(press_release, n=20))
     if not cp_kws and not ir_kws:
         return 0.5
     union  = cp_kws | ir_kws
@@ -265,7 +266,7 @@ def _most_representative_sentence(text: str) -> str:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 6. 社風リアル度スコア（統合指標）
+# 6. IR誠実度スコア（統合指標）
 # ══════════════════════════════════════════════════════════════════════════════
 
 def realness_score(gap: float, sentiment: float, kw_match: float) -> float:
@@ -276,7 +277,7 @@ def realness_score(gap: float, sentiment: float, kw_match: float) -> float:
     返値      : 0〜100（高いほど「会社説明が実態に近い＝信頼できる」）
     """
     w_gap  = 0.5   # ギャップが大きいと大幅減点
-    w_sent = 0.3   # 体験記がネガティブなら減点
+    w_sent = 0.3   # プレスリリースがネガティブなら減点
     w_kw   = 0.2   # キーワード不一致なら減点
 
     gap_norm  = 1.0 - (gap / 100.0)           # 高いほど良い
@@ -289,30 +290,30 @@ def realness_score(gap: float, sentiment: float, kw_match: float) -> float:
 # 7. 1社分の全指標を計算
 # ══════════════════════════════════════════════════════════════════════════════
 
-def analyze_company(company: str, company_page: str, intern_report: str) -> dict:
+def analyze_company(company: str, ir_summary: str, press_release: str) -> dict:
     """
     Returns
     -------
     dict with keys:
       company, gap_score, sentiment, kw_match, realness,
-      kw_diff, rep_company, rep_intern
+      kw_diff, rep_ir, rep_press
     """
-    gap   = calc_gap_score(company_page, intern_report)
-    sent  = sentiment_score(intern_report)
-    kwm   = keyword_match_rate(company_page, intern_report)
+    gap   = calc_gap_score(ir_summary, press_release)
+    sent  = sentiment_score(press_release)
+    kwm   = keyword_match_rate(ir_summary, press_release)
     real  = realness_score(gap, sent, kwm)
-    diff  = keyword_diff(company_page, intern_report)
+    diff  = keyword_diff(ir_summary, press_release)
     return {
         "company":     company,
         "gap_score":   gap,
         "sentiment":   sent,
         "kw_match":    round(kwm * 100, 1),
         "realness":    real,
-        "kw_company":  diff["company_only"],
-        "kw_intern":   diff["intern_only"],
+        "kw_ir":  diff["company_only"],
+        "kw_press":   diff["intern_only"],
         "kw_common":   diff["common"],
-        "rep_company": _most_representative_sentence(company_page),
-        "rep_intern":  _most_representative_sentence(intern_report),
+        "rep_ir": _most_representative_sentence(ir_summary),
+        "rep_press":  _most_representative_sentence(press_release),
     }
 
 
@@ -330,8 +331,8 @@ def analyze_all(csv_path: str = CSV_PATH) -> pd.DataFrame:
     for _, row in df.iterrows():
         r = analyze_company(
             str(row.get("company", "")),
-            str(row.get("company_page", "")),
-            str(row.get("intern_report", "")),
+            str(row.get("ir_summary", "")),
+            str(row.get("press_release", "")),
         )
         results.append(r)
     result_df = pd.DataFrame(results)
@@ -362,20 +363,20 @@ if __name__ == "__main__":
                 print(f"\n{'='*60}")
                 print(f"  {r['company']}")
                 print(f"{'='*60}")
-                print(f"  乖離度スコア  : {r['gap_score']:.1f} / 100")
+                print(f"  表現ギャップスコア  : {r['gap_score']:.1f} / 100")
                 print(f"  感情スコア    : {r['sentiment']:+.3f}  (正=ポジ / 負=ネガ)")
                 print(f"  KW一致率      : {r['kw_match']:.1f}%")
-                print(f"  社風リアル度  : {r['realness']:.1f} / 100")
-                print(f"\n  [会社ページ代表文]")
-                print(f"  {r['rep_company']}")
-                print(f"\n  [体験記代表文]")
-                print(f"  {r['rep_intern']}")
-                print(f"\n  [会社ページ固有KW] {r['kw_company']}")
-                print(f"  [体験記固有KW    ] {r['kw_intern']}")
+                print(f"  IR誠実度  : {r['realness']:.1f} / 100")
+                print(f"\n  [IR資料代表文]")
+                print(f"  {r['rep_ir']}")
+                print(f"\n  [プレスリリース代表文]")
+                print(f"  {r['rep_press']}")
+                print(f"\n  [IR資料固有KW] {r['kw_ir']}")
+                print(f"  [プレスリリース固有KW    ] {r['kw_press']}")
             sys.exit(0)
 
     # 全社ランキング
-    print(f"\n{'社名':<28} {'乖離度':>6}  {'感情':>6}  {'KW一致':>6}  {'リアル度':>7}")
+    print(f"\n{'社名':<28} {'表現ギャップ':>6}  {'感情':>6}  {'KW一致':>6}  {'リアル度':>7}")
     print("-" * 64)
     for _, r in df_all.iterrows():
         print(
