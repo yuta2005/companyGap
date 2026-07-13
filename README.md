@@ -18,7 +18,7 @@
 # 1. 依存パッケージをインストール
 pip install -r requirements.txt
 
-# 2. サンプルデータを生成(合成データ・20社分)
+# 2. サンプルデータを生成(合成データ・5社分)
 python collect.py
 
 # 2'. 実データを取得する場合(要EDINET APIキー)
@@ -65,7 +65,7 @@ IR誠実度 = (1 − 表現ギャップ) × 0.5 + 感情正規化 × 0.3 + KW一
 
 ```
 skill_matcher/
-├── collect.py        # EDINET API連携 + プレスリリース取得(robots.txt確認付き) + サンプル20社
+├── collect.py        # EDINET API連携 + プレスリリース取得(robots.txt確認付き) + サンプル5社
 ├── engine.py          # 表現ギャップ計算コア(形態素解析 / TF-IDF / 感情 / KW差分)
 ├── app.py             # Streamlit UI
 ├── jobs.csv           # 収集したIR資料 & プレスリリースデータ

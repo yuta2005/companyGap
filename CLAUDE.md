@@ -14,7 +14,7 @@ The project originally scraped internship-review sites (One Career, 就活会議
 # Install dependencies
 pip install -r requirements.txt
 
-# Generate sample data (20 companies, synthetic) into jobs.csv — required before running engine.py or app.py
+# Generate sample data (5 companies, synthetic) into jobs.csv — required before running engine.py or app.py
 python collect.py
 
 # Fetch real data for one company (requires EDINET_API_KEY env var)
@@ -38,13 +38,13 @@ There is no test suite, linter, or build step in this repo.
 Three-file pipeline, no framework beyond Streamlit/pandas/scikit-learn:
 
 - **`collect.py`** — produces `jobs.csv` (columns: `company`, `ir_summary`, `press_release`). Two modes:
-  - Default: writes the hardcoded `SAMPLE_DATA` list (20 synthetic companies; only 5 base patterns exist — `_EXTRA_NAMES` companies 6–20 reuse one of the first 5 verbatim via `i % 5`, so they are not independent samples).
+  - Default: writes the hardcoded `SAMPLE_DATA` list (5 synthetic companies, one per pattern — the earlier version padded this to 20 by duplicating the 5 patterns via `_EXTRA_NAMES`; that duplication was removed since it added no real variety).
   - `--edinet <EDINETコード> [日付]`: calls the real EDINET API v2 (`fetch_document_list` / `find_yuho` / `search_yuho_recent`) to locate a company's 有価証券報告書 (docTypeCode 120), downloads it as CSV (`download_yuho_text`, type=5, UTF-16 tab-separated), and extracts specific XBRL text-block elements (`TARGET_ELEMENTS`: business policy/issues, business description), capped at 2000 chars. Requires `EDINET_API_KEY` env var; falls back to `SAMPLE_DATA` if the lookup or extraction fails. Verified end-to-end against the live API (Toyota, EDINET code E02144) — `TARGET_ELEMENTS` correctly matches real XBRL element names.
   - Press-release text (`fetch_press_release`) is fetched from a company's own IR page and is always gated by `can_fetch()` (robots.txt check) before any request; truncated to 1000 chars. Branches on the response's `Content-Type`: PDF (`pypdf`, needs the `cryptography` package too since many corporate IR PDFs are AES-encrypted for edit-protection) or HTML (BeautifulSoup, fed `res.content` — not `res.text` — so bs4 can sniff the real encoding; pages without a `charset` in their `Content-Type` header would otherwise get mis-decoded as Latin-1 by `requests`). Anything else logs a warning and returns `""`. Verified against real IR pages: EDINET/Toyota (XBRL), NRI (AES-encrypted PDF), Nintendo (charset-less HTML, was mojibake before the `res.content` fix).
 
 - **`engine.py`** — all scoring logic; both `app.py` and the CLI import from here. Key entry points: `analyze_company(company, ir_summary, press_release) -> dict` and `analyze_all(csv_path) -> pd.DataFrame` (sorted ascending by `realness`, i.e. worst gap first).
 
-  Tokenization (`tokenize()`) auto-selects a backend at import time via `_init_tagger()`, tried in order: **MeCab → fugashi → char n-gram fallback** (2–3 char substrings over Japanese Unicode ranges). This means `TfidfVectorizer` is configured differently depending on which mode is active (`analyzer="char_wb"` for chargram mode vs. a custom `tokenizer=tokenize` for MeCab/fugashi) — when touching TF-IDF logic, changes must work under both branches, and the current dev environment normally runs in chargram fallback mode since neither MeCab nor fugashi is installed by default.
+  Tokenization (`tokenize()`) auto-selects a backend at import time via `_init_tagger()`, tried in order: **MeCab → fugashi → char n-gram fallback** (2–3 char substrings over Japanese Unicode ranges). This means `TfidfVectorizer` is configured differently depending on which mode is active (`analyzer="char_wb"` for chargram mode vs. a custom `tokenizer=tokenize` for MeCab/fugashi) — when touching TF-IDF logic, changes must work under both branches. `fugashi` + `unidic-lite` are now in `requirements.txt`, so a normal `pip install -r requirements.txt` gives proper morphological analysis (fugashi mode); the char n-gram path only kicks in if that install is skipped or fails.
 
   Sentiment (`sentiment_score()`) merges an optional `pn-ja.dic` (Tohoku University polarity dictionary, tab-separated `word\treading\tpos\tscore`, not checked into this repo) with the builtin `_BUILTIN_PN` dict in `engine.py`; builtin entries are overridden by `pn-ja.dic` on key collision. `_BUILTIN_PN` is scoped to IR/press-release phrasing (増益, 減損, 過去最高, 挑戦, 加速, etc.) — the old internship-review-domain entries (残業, やりがい, ストレス, etc.) have been removed. In chargram mode, sentiment is computed by substring search of the whole `_PN_DICT` against the raw text rather than through `tokenize()`. Sentiment is scored only against `press_release` (not `ir_summary`).
 
