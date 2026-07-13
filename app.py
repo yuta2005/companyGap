@@ -80,20 +80,21 @@ st.markdown("""
 
 # ─── データ読み込み ───────────────────────────────────────────────────────────
 @st.cache_data(show_spinner="全社を分析中...")
-def load_data():
-    return analyze_all()
-
-try:
-    df = load_data()
-except FileNotFoundError as e:
-    st.error(str(e))
-    st.code("python collect.py", language="bash")
-    st.stop()
+def load_data(kw_method: str):
+    return analyze_all(kw_method=kw_method)
 
 # ─── サイドバー ───────────────────────────────────────────────────────────────
+_KW_METHOD_LABELS = {
+    "TF-IDF（全社コーパスIDF）": "tfidf",
+    "TF（出現頻度）": "tf",
+    "TextRank（共起グラフ）": "textrank",
+}
+
 with st.sidebar:
     st.markdown("### ⚙️ 表示設定")
     view_mode = st.radio("表示モード", ["全社ランキング", "企業詳細分析", "手動入力で分析"])
+    kw_label = st.selectbox("キーワード抽出手法", list(_KW_METHOD_LABELS.keys()))
+    kw_method = _KW_METHOD_LABELS[kw_label]
     st.divider()
 
     st.markdown("### 📊 スコア説明")
@@ -108,6 +109,13 @@ with st.sidebar:
 
     st.divider()
     st.caption("MeCab/fugashi が未インストールの場合は char n-gram で動作します。\n\n`python -m streamlit run app.py` で起動してください。")
+
+try:
+    df = load_data(kw_method)
+except FileNotFoundError as e:
+    st.error(str(e))
+    st.code("python collect.py", language="bash")
+    st.stop()
 
 # ══════════════════════════════════════════════════════════════════════════════
 # モード 1: 全社ランキング
@@ -319,6 +327,7 @@ elif view_mode == "手動入力で分析":
                     company_name or "入力企業",
                     ir_text,
                     press_text,
+                    kw_method=kw_method,
                 )
 
             real = result["realness"]
