@@ -69,7 +69,7 @@ IR誠実度 = (1 − 表現ギャップ) × 0.5 + 感情正規化 × 0.3 + KW一
 ## 🗂 ファイル構成
 
 ```
-skill_matcher/
+companyGap/
 ├── collect.py        # EDINET API連携 + プレスリリース取得(robots.txt確認付き) + サンプル5社
 ├── engine.py          # 表現ギャップ計算コア(形態素解析 / TF-IDF / 感情 / KW差分)
 ├── app.py             # Streamlit UI
