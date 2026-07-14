@@ -133,40 +133,50 @@ def _keep_token(t: str) -> bool:
     return True
 
 
-def _tokenize_chunk(chunk: str) -> list[str]:
+def _tokenize_chunk(chunk: str, split_compounds: bool = False) -> list[str]:
     """空白を含まない1チャンクを形態素解析してトークン化。
 
     連続する名詞（+接頭辞/接尾辞）は複合語として結合する
     （営業/利益/率 → 営業利益率）。動詞・形容詞は基本形に正規化。
+    split_compounds=True の場合、複合語に加えて構成名詞も出力する
+    （海外向け販売 → 海外向け販売, 海外, 販売）。類似度計算用。
     """
     tokens = []
     compound = ""
     compound_has_noun = False   # 接尾辞のみの結合 (「月期」等) を除外するため
+    pieces = []                 # 複合語を構成する名詞片（split_compounds 用）
     for surface, pos1, pos2, base in _parse_morphemes(chunk):
         if _is_noun_piece(pos1, pos2):
             compound += surface
             compound_has_noun = compound_has_noun or pos1 == "名詞"
+            if pos1 == "名詞":
+                pieces.append(surface)
             continue
         if compound:
             if compound_has_noun:
                 tokens.append(compound)
+                if split_compounds and len(pieces) >= 2:
+                    tokens.extend(pieces)
             compound = ""
             compound_has_noun = False
+            pieces = []
         if pos1 in ("動詞", "形容詞") and pos2 not in ("非自立", "非自立可能", "接尾"):
             tokens.append(base)
     if compound and compound_has_noun:
         tokens.append(compound)
+        if split_compounds and len(pieces) >= 2:
+            tokens.extend(pieces)
     return [t for t in tokens if _keep_token(t)]
 
 
-def tokenize(text: str) -> list[str]:
+def tokenize(text: str, split_compounds: bool = False) -> list[str]:
     """テキストを形態素解析してトークンリストを返す"""
     if _TOKENIZE_MODE in ("mecab", "fugashi"):
         # 空白区切りで複合語が途切れるよう、チャンク単位で解析する
         tokens = []
         for chunk in re.split(r"[\s　]+", text):
             if chunk:
-                tokens.extend(_tokenize_chunk(chunk))
+                tokens.extend(_tokenize_chunk(chunk, split_compounds))
         return tokens
 
     # char n-gram（2〜4文字の部分文字列。MeCab なしでも日本語に有効）
@@ -207,23 +217,53 @@ def _strip_boilerplate(text: str) -> str:
 # 2. ギャップスコア（TF-IDF + コサイン類似度）
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _tokenize_split(text: str) -> list[str]:
+    """類似度計算用トークナイザ。複合語とその構成名詞の両方を素性にする
+    （「海外向け販売」と「海外売上」が「海外」で部分一致できるように）。"""
+    return tokenize(text, split_compounds=True)
+
+
+# 文字 n-gram 類似度の計算対象に残す文字（漢字・カタカナ・英字）。
+# ひらがな（助詞・活用語尾）を残すと内容と無関係に類似度が底上げされるため除く。
+_CONTENT_CHAR_RE = re.compile(r"[^゠-ヿ一-鿿A-Za-z]")
+
+
+def _char_ngram_similarity(a: str, b: str) -> float:
+    """内容文字のみの char 2-3gram TF-IDF cosine 類似度（0〜1）"""
+    a2 = _CONTENT_CHAR_RE.sub(" ", a)
+    b2 = _CONTENT_CHAR_RE.sub(" ", b)
+    vec = TfidfVectorizer(analyzer="char_wb", ngram_range=(2, 3), min_df=1)
+    tfidf = vec.fit_transform([a2, b2])
+    return float(cosine_similarity(tfidf[0], tfidf[1])[0][0])
+
+
+# 単語 cosine と文字 n-gram cosine のブレンド比（単語側の重み）
+_GAP_WORD_WEIGHT = 0.6
+
+
 def calc_gap_score(ir_summary: str, press_release: str) -> float:
     """
     IR資料とプレスリリースのコサイン類似度から表現ギャップを算出。
     返値: 0〜100（高いほど建前と本音がズレている）
-    """
-    if _TOKENIZE_MODE == "chargram":
-        vec = TfidfVectorizer(analyzer="char_wb", ngram_range=(2, 3), min_df=1)
-        docs = [ir_summary, press_release]
-    else:
-        vec = TfidfVectorizer(analyzer="word", token_pattern=None,
-                              tokenizer=tokenize, min_df=1)
-        docs = [ir_summary, press_release]
 
+    単語（複合語+構成名詞）cosine と文字 n-gram cosine のブレンド。
+    形態素の完全一致だけでは短い文書で類似度が 0 に張り付きやすいため、
+    文字 n-gram で表層の部分一致（海外向け販売/海外売上 等）を拾って補正する。
+    """
     try:
-        tfidf = vec.fit_transform(docs)
-        similarity = cosine_similarity(tfidf[0], tfidf[1])[0][0]
-        return round((1.0 - float(similarity)) * 100, 1)
+        if _TOKENIZE_MODE == "chargram":
+            vec = TfidfVectorizer(analyzer="char_wb", ngram_range=(2, 3), min_df=1)
+            tfidf = vec.fit_transform([ir_summary, press_release])
+            similarity = float(cosine_similarity(tfidf[0], tfidf[1])[0][0])
+        else:
+            vec = TfidfVectorizer(analyzer="word", token_pattern=None,
+                                  tokenizer=_tokenize_split, min_df=1)
+            tfidf = vec.fit_transform([ir_summary, press_release])
+            word_sim = float(cosine_similarity(tfidf[0], tfidf[1])[0][0])
+            char_sim = _char_ngram_similarity(ir_summary, press_release)
+            similarity = (_GAP_WORD_WEIGHT * word_sim
+                          + (1.0 - _GAP_WORD_WEIGHT) * char_sim)
+        return round((1.0 - similarity) * 100, 1)
     except Exception:
         return 50.0   # 計算失敗時は中間値
 
