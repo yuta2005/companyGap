@@ -2,3 +2,6 @@ jobs.csv
 __pycache__/
 *.pyc
 .env
+
+# MS Word lock files
+~$*.docx
