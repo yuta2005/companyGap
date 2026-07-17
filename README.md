@@ -124,12 +124,6 @@ companyGap/
 3. 決算関連URLは決算期ごとに変わるため、いずれ陳腐化します。
    その場合は行を削除せず、最新のリリースURLに更新してください
 
-## 講義資料との対応(TF-IDFの式)
-
-講義「検索対象の表現と索引付け」の定義
-`w(t,d) = tf(t,d) × idf(t)`, `idf(t) = log(N/df(t)) + 1` に一致させるため、
-全 TfidfVectorizer で `smooth_idf=False`・生のtf(sublinear_tfなし)を使用。
-L2正規化(既定)は講義の「文書長による正規化」に相当する。
 
 ---
 
