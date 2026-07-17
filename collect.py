@@ -203,7 +203,9 @@ def fetch_press_release(url: str) -> str:
             main = soup.find("main") or soup.find("article") or soup.body
             text = main.get_text(separator=" ", strip=True) if main else ""
         else:
-            print(f"  [WARN] 未対応の形式のためスキップ ({content_type or '不明'}): {url}")
+            print(
+                f"  [WARN] 未対応の形式のためスキップ ({content_type or '不明'}): {url}"
+            )
             return ""
 
         return re.sub(r"\s+", " ", text)[:1000]
@@ -261,14 +263,14 @@ def collect_batch(list_path: str) -> list[dict]:
 
 
 # ══════════════════════════════════════════════════════════════════════
-# 5. サンプルデータ(合成) ─ 5社分
+# 5. サンプルデータ ─ 5社分
 #    ※実データ取得(EDINET API登録)が未完了でも動作確認できるよう用意。
 #      内容は「決算の事実」と「プレスリリースの見出し表現」の
 #      典型的なズレパターンを想定して作成した合成データ(実在企業の
 #      引用ではない)。有報の「経営方針・課題」欄に近い分量・文体とし、
 #      IR/プレス間で語彙が部分的に重なるよう設計している(実データでは
 #      完全に語彙が分離することはまずないため)。
-#      想定する乖離度: A・C・E社(大きい) ≫ B・D社(小さい)
+#      想定する乖離度: A・C・E社(大きい) > B・D社(小さい)
 # ══════════════════════════════════════════════════════════════════════
 
 SAMPLE_DATA = [
@@ -438,4 +440,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

@@ -4,8 +4,9 @@ engine.py  ─  IR資料 × プレスリリース 表現ギャップ測定の全
 
 会社の「決算実態(有価証券報告書等の事実ベース記述)」と
 「プレスリリースの見出し・アピール文」の乖離を測定する。
-プレスリリースデータではなく EDINET(金融庁)由来の公開データを用いるため、
-著作権法30条の4(情報解析目的の利用)の趣旨に沿った設計にしている。
+当初案の体験記サイトのデータではなく、EDINET(金融庁)の法定開示情報と
+企業自身が公開する広報文を情報解析目的で用いるため、
+著作権法30条の4(情報解析のための利用)の趣旨に沿った設計にしている。
 
 機能:
   - tokenize()          形態素解析 (fugashi = MeCab + UniDic辞書)
@@ -33,7 +34,7 @@ from sklearn.metrics.pairwise import cosine_similarity
 CSV_PATH = os.path.join(os.path.dirname(__file__), "jobs.csv")
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 1. 形態素解析（fugashi = MeCab の Python バインディング + UniDic 辞書）
+# 1. 形態素解析
 # ══════════════════════════════════════════════════════════════════════════════
 
 try:
@@ -49,18 +50,94 @@ _TAGGER = fugashi.Tagger()
 
 # 除外するストップワード
 _STOPWORDS = {
-    "の", "に", "は", "を", "が", "で", "と", "も", "や", "へ", "から", "より",
-    "て", "し", "た", "い", "な", "こと", "もの", "ため", "よう", "あり", "でき",
-    "いる", "する", "ある", "なる", "れる", "られる", "ます", "です", "ない",
-    "その", "この", "それ", "これ", "あの", "ご", "お", "さ", "ん", "か",
-    "当社", "会社", "企業", "当期", "前期", "事業",  # 全社共通で頻出 → 弁別力低
-    "以下", "同様", "とおり", "場合", "本資料", "資料",
-    "億円", "兆円", "万円", "万台", "万本", "万人", "年度", "月期", "年月",
+    "の",
+    "に",
+    "は",
+    "を",
+    "が",
+    "で",
+    "と",
+    "も",
+    "や",
+    "へ",
+    "から",
+    "より",
+    "て",
+    "し",
+    "た",
+    "い",
+    "な",
+    "こと",
+    "もの",
+    "ため",
+    "よう",
+    "あり",
+    "でき",
+    "いる",
+    "する",
+    "ある",
+    "なる",
+    "れる",
+    "られる",
+    "ます",
+    "です",
+    "ない",
+    "その",
+    "この",
+    "それ",
+    "これ",
+    "あの",
+    "ご",
+    "お",
+    "さ",
+    "ん",
+    "か",
+    "当社",
+    "会社",
+    "企業",
+    "当期",
+    "前期",
+    "事業",  # 全社共通で頻出 → 弁別力低
+    "以下",
+    "同様",
+    "とおり",
+    "場合",
+    "本資料",
+    "資料",
+    "億円",
+    "兆円",
+    "万円",
+    "万台",
+    "万本",
+    "万人",
+    "年度",
+    "月期",
+    "年月",
     # 情報量の乏しい軽動詞（基本形で登録。〜において/〜を行う 等に由来）
-    "おく", "おける", "行う", "いう", "含む", "基づく", "関する", "対する",
-    "有する", "通ずる", "応じる", "示す", "用いる", "もつ", "持つ", "よる",
+    "おく",
+    "おける",
+    "行う",
+    "いう",
+    "含む",
+    "基づく",
+    "関する",
+    "対する",
+    "有する",
+    "通ずる",
+    "応じる",
+    "示す",
+    "用いる",
+    "もつ",
+    "持つ",
+    "よる",
     # 社名表記の断片
-    "Inc", "Ltd", "Co", "Corporation", "Limited", "inc", "ltd",
+    "Inc",
+    "Ltd",
+    "Co",
+    "Corporation",
+    "Limited",
+    "inc",
+    "ltd",
 }
 
 # 複合名詞を構成しうる品詞（名詞 + 接頭辞/接尾辞。UniDic の品詞体系）
@@ -87,11 +164,13 @@ def _is_noun_piece(pos1: str, pos2: str) -> bool:
 def _keep_token(t: str) -> bool:
     if len(t) < 2 or t in _STOPWORDS:
         return False
-    if re.fullmatch(r"[0-9０-９.,．，%％]+", t):          # 数値のみ
+    if re.fullmatch(r"[0-9０-９.,．，%％]+", t):  # 数値のみ
         return False
-    if re.fullmatch(r"[0-9０-９.,．，]+[兆億万千百]?[円台本人株期年月日]*", t):  # 数値+助数詞
+    if re.fullmatch(
+        r"[0-9０-９.,．，]+[兆億万千百]?[円台本人株期年月日]*", t
+    ):  # 数値+助数詞
         return False
-    if re.fullmatch(r"[A-Za-zＡ-Ｚａ-ｚ]{1,2}", t):        # 短い英字断片 (FY, Q など)
+    if re.fullmatch(r"[A-Za-zＡ-Ｚａ-ｚ]{1,2}", t):  # 短い英字断片 (FY, Q など)
         return False
     return True
 
@@ -106,8 +185,8 @@ def _tokenize_chunk(chunk: str, split_compounds: bool = False) -> list[str]:
     """
     tokens = []
     compound = ""
-    compound_has_noun = False   # 接尾辞のみの結合 (「月期」等) を除外するため
-    pieces = []                 # 複合語を構成する名詞片（split_compounds 用）
+    compound_has_noun = False  # 接尾辞のみの結合 (「月期」等) を除外するため
+    pieces = []  # 複合語を構成する名詞片（split_compounds 用）
     for surface, pos1, pos2, base in _parse_morphemes(chunk):
         if _is_noun_piece(pos1, pos2):
             compound += surface
@@ -170,13 +249,13 @@ def _strip_boilerplate(text: str) -> str:
 # ══════════════════════════════════════════════════════════════════════════════
 # 2. ギャップスコア（TF-IDF + コサイン類似度）
 # ══════════════════════════════════════════════════════════════════════════════
-# TF-IDF の重みは講義資料「検索対象の表現と索引付け」の定義
-#     w(t, d) = tf(t, d) × idf(t),   idf(t) = log(N / df(t)) + 1
+# TF-IDF の重みは
+# w(t, d) = tf(t, d) × idf(t),   idf(t) = log(N / df(t)) + 1
 # に合わせる。sklearn の既定は平滑化 idf（smooth_idf=True →
 # log((1+N)/(1+df))+1）のため、全 TfidfVectorizer で smooth_idf=False を
-# 指定して講義の式と一致させる。tf も講義どおり生の頻度を使う
-# （sublinear_tf は使わない）。norm='l2'（既定）は講義の
-# 「文書長による正規化」に相当し、コサイン類似度の値には影響しない。
+# 指定して上の式と一致させる。tf も生の頻度を使う
+# （sublinear_tf は使わない）。
+
 
 def _tokenize_split(text: str) -> list[str]:
     """類似度計算用トークナイザ。複合語とその構成名詞の両方を素性にする
@@ -190,14 +269,18 @@ def calc_gap_score(ir_summary: str, press_release: str) -> float:
     返値: 0〜100（高いほど建前と本音がズレている）
     """
     try:
-        vec = TfidfVectorizer(analyzer="word", token_pattern=None,
-                              tokenizer=_tokenize_split, min_df=1,
-                              smooth_idf=False)
+        vec = TfidfVectorizer(
+            analyzer="word",
+            token_pattern=None,
+            tokenizer=_tokenize_split,
+            min_df=1,
+            smooth_idf=False,
+        )
         tfidf = vec.fit_transform([ir_summary, press_release])
         similarity = float(cosine_similarity(tfidf[0], tfidf[1])[0][0])
         return round((1.0 - similarity) * 100, 1)
     except Exception:
-        return 50.0   # 計算失敗時は中間値
+        return 50.0  # 計算失敗時は中間値
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -234,9 +317,13 @@ def extract_keywords(text: str, n: int = 8) -> list[str]:
     """
     text = _strip_boilerplate(text)
 
-    vec = TfidfVectorizer(analyzer="word", token_pattern=None,
-                          tokenizer=tokenize, smooth_idf=False,
-                          lowercase=False)
+    vec = TfidfVectorizer(
+        analyzer="word",
+        token_pattern=None,
+        tokenizer=tokenize,
+        smooth_idf=False,
+        lowercase=False,
+    )
     try:
         docs = _background_corpus() + [text]
         tfidf = vec.fit_transform(docs)
@@ -261,8 +348,8 @@ def keyword_diff(ir_summary: str, press_release: str, n: int = 6) -> dict:
     cp_set, pr_set = set(cp_kws), set(pr_kws)
     return {
         "company_only": [w for w in cp_kws if w not in pr_set][:n],
-        "intern_only":  [w for w in pr_kws if w not in cp_set][:n],
-        "common":       [w for w in cp_kws if w in pr_set][:n],
+        "intern_only": [w for w in pr_kws if w not in cp_set][:n],
+        "common": [w for w in cp_kws if w in pr_set][:n],
     }
 
 
@@ -281,6 +368,7 @@ def keyword_match_rate(ir_summary: str, press_release: str) -> float:
 # 5. 代表文抽出（最も特徴的な文を1文返す）
 # ══════════════════════════════════════════════════════════════════════════════
 
+
 def _most_representative_sentence(text: str) -> str:
     """LexRank（文間類似度グラフの中心性）で最も代表的な文を返す。
 
@@ -294,15 +382,16 @@ def _most_representative_sentence(text: str) -> str:
     if len(sentences) == 1:
         return sentences[0]
 
-    vec = TfidfVectorizer(analyzer="word", token_pattern=None,
-                          tokenizer=tokenize, smooth_idf=False)
+    vec = TfidfVectorizer(
+        analyzer="word", token_pattern=None, tokenizer=tokenize, smooth_idf=False
+    )
     try:
         tfidf = vec.fit_transform(sentences)
         sim = cosine_similarity(tfidf)
         np.fill_diagonal(sim, 0.0)
         row_sum = sim.sum(axis=1, keepdims=True)
         row_sum[row_sum == 0] = 1.0
-        M = sim / row_sum          # 行確率行列
+        M = sim / row_sum  # 行確率行列
         size = len(sentences)
         r = np.full(size, 1.0 / size)
         damping = 0.85
@@ -319,16 +408,17 @@ def _most_representative_sentence(text: str) -> str:
 # 6. IR誠実度スコア（統合指標）
 # ══════════════════════════════════════════════════════════════════════════════
 
+
 def realness_score(gap: float, kw_match: float) -> float:
     """
     gap       : 0〜100（大 = 乖離が大きい）
     kw_match  : 0〜1  （大 = キーワード一致）
     返値      : 0〜100（高いほど「会社説明が実態に近い＝信頼できる」）
     """
-    w_gap = 0.7   # ギャップが大きいと大幅減点
-    w_kw  = 0.3   # キーワード不一致なら減点
+    w_gap = 0.7  # ギャップが大きいと大幅減点
+    w_kw = 0.3  # キーワード不一致なら減点
 
-    gap_norm = 1.0 - (gap / 100.0)            # 高いほど良い
+    gap_norm = 1.0 - (gap / 100.0)  # 高いほど良い
     raw = gap_norm * w_gap + kw_match * w_kw
     return round(raw * 100, 1)
 
@@ -336,6 +426,7 @@ def realness_score(gap: float, kw_match: float) -> float:
 # ══════════════════════════════════════════════════════════════════════════════
 # 7. 1社分の全指標を計算
 # ══════════════════════════════════════════════════════════════════════════════
+
 
 def analyze_company(company: str, ir_summary: str, press_release: str) -> dict:
     """
@@ -346,29 +437,30 @@ def analyze_company(company: str, ir_summary: str, press_release: str) -> dict:
       kw_ir, kw_press, kw_common, rep_ir, rep_press
     """
     # 免責事項などの定型文は全指標を汚染するため最初に除去する
-    ir_clean    = _strip_boilerplate(ir_summary)
+    ir_clean = _strip_boilerplate(ir_summary)
     press_clean = _strip_boilerplate(press_release)
 
-    gap   = calc_gap_score(ir_clean, press_clean)
-    kwm   = keyword_match_rate(ir_clean, press_clean)
-    real  = realness_score(gap, kwm)
-    diff  = keyword_diff(ir_clean, press_clean)
+    gap = calc_gap_score(ir_clean, press_clean)
+    kwm = keyword_match_rate(ir_clean, press_clean)
+    real = realness_score(gap, kwm)
+    diff = keyword_diff(ir_clean, press_clean)
     return {
-        "company":     company,
-        "gap_score":   gap,
-        "kw_match":    round(kwm * 100, 1),
-        "realness":    real,
-        "kw_ir":  diff["company_only"],
-        "kw_press":   diff["intern_only"],
-        "kw_common":   diff["common"],
+        "company": company,
+        "gap_score": gap,
+        "kw_match": round(kwm * 100, 1),
+        "realness": real,
+        "kw_ir": diff["company_only"],
+        "kw_press": diff["intern_only"],
+        "kw_common": diff["common"],
         "rep_ir": _most_representative_sentence(ir_clean),
-        "rep_press":  _most_representative_sentence(press_clean),
+        "rep_press": _most_representative_sentence(press_clean),
     }
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 8. CSV 全社を分析
 # ══════════════════════════════════════════════════════════════════════════════
+
 
 def analyze_all(csv_path: str = CSV_PATH) -> pd.DataFrame:
     if not os.path.exists(csv_path):
@@ -396,8 +488,10 @@ def analyze_all(csv_path: str = CSV_PATH) -> pd.DataFrame:
 
 if __name__ == "__main__":
     import io
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8",
-                                  errors="replace", line_buffering=True)
+
+    sys.stdout = io.TextIOWrapper(
+        sys.stdout.buffer, encoding="utf-8", errors="replace", line_buffering=True
+    )
 
     target = " ".join(sys.argv[1:]).strip() if len(sys.argv) > 1 else ""
 
